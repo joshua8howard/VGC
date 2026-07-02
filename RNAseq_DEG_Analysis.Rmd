@@ -1,0 +1,321 @@
+---
+title: "RNAseq Analysis: From Count Table to DEGs"
+subtitle: "Beginner's Workflow (Part 3) — Best Practices"
+author: "Dr. Lei Guo"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: cosmo
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Introduction
+
+This workflow picks up after you have generated a gene expression count
+matrix from raw sequencing data (see Parts 1 and 2 of the series, which
+cover processing FASTQ files into a count matrix). Here we move from
+the Linux environment into R to perform differential expression (DE)
+analysis, data visualization, and other downstream statistical
+analyses.
+
+# Installing R and RStudio
+
+Installation is done outside of this script:
+
+1. **Install R** — download the latest version for your OS from the
+   official R website and follow the installer prompts.
+2. **Install RStudio** — download the appropriate version from the
+   RStudio download page and install it like any other application.
+
+RStudio provides:
+
+- **Code Editor Window** — write/edit scripts; run selected code with
+  "Run" or the whole script with "Source".
+- **R Console Window** — real-time interaction with R; shows output,
+  errors, and print statements.
+- **Work Space Window** — lists all objects in your current session
+  (variables, data sets, functions).
+- **Plot & Files Window** — view, export, or zoom into generated
+  plots.
+
+# Setting Up Your R Environment
+
+## Installing Required Packages
+
+Packages come from two main repositories: CRAN and Bioconductor. Run
+this once to install everything needed for the workflow below.
+
+```{r install-packages, eval=FALSE}
+if (!require("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+BiocManager::install(c("sva", "edgeR", "limma", "Biobase", "biomaRt",
+                        "clusterProfiler", "EnhancedVolcano", "org.Hs.eg.db",
+                        "org.Mm.eg.db", "org.Rn.eg.db"))
+
+install.packages(c("data.table", "readxl", "stringr", "ggplot2", "ggrepel",
+                    "ggfortify", "ggprism", "pheatmap", "VennDiagram",
+                    "corrplot", "Hmisc", "stats", "tidyverse"))
+```
+
+If prompted to update existing packages, you can press "N" to skip.
+
+## Loading Installed Packages
+
+```{r load-packages}
+library(data.table)
+library(edgeR)
+library(limma)
+library(ggplot2)
+library(ggrepel)
+library(ggfortify)
+library(stats)
+library(sva)
+```
+
+## Setting Your Working Directory
+
+Create a project folder on your computer and set it as the working
+directory. All outputs will be saved here unless otherwise specified.
+
+```{r set-wd, eval=FALSE}
+# MacOS
+setwd("/Users/yourusername/Documents/RNAseq")
+
+# Windows
+setwd("C:\\Users\\yourusername\\Documents\\RNAseq")
+```
+
+Replace `yourusername` with your actual username.
+
+# Data Preparation and Analysis
+
+## Reading Data
+
+### Building the count matrix from featureCounts output (optional)
+
+If you haven't yet combined individual count files into a single
+expression matrix, do so as follows:
+
+```{r build-count-matrix, eval=FALSE}
+# Retrieve count file paths
+file_names <- list.files(count_file_path,
+                          pattern = "featureCounts_exon\\.txt$",
+                          recursive = TRUE, full.names = TRUE)
+
+# Read all count files into a DGEList
+dgls <- readDGE(file_names, columns = c(1, 7), skip = 1)
+counts_raw <- as.data.frame(dgls$counts)
+
+# Rename samples
+sample_name <- gsub("_featureCounts_exon", "", basename(colnames(counts_raw)))
+colnames(counts_raw) <- sample_name
+
+# Save the combined count table
+fwrite(counts_raw, "counts_raw.tsv", sep = "\t")
+```
+
+### Reading the combined count table
+
+```{r read-counts, eval=FALSE}
+count_tbl <- fread("counts_raw.tsv", data.table = FALSE)
+```
+
+View it via `View(count_tbl)` in the console, or by clicking `count_tbl`
+in the Work Space window.
+
+## Data Cleaning
+
+### Add row names to the count table
+
+```{r rownames}
+rownames(count_tbl) <- count_tbl[[1]]
+count_tbl <- count_tbl[, -1]
+```
+
+> **Note:** If your table has separate `GeneID` and `GeneSymbol`
+> columns (rather than a single identifier column), see the
+> [Handling a GeneID + GeneSymbol annotation table] section below
+> before proceeding, to avoid duplicate row name errors.
+
+### Filtering low-expressed genes
+
+```{r filter-low-expr}
+perc_keep <- 0.8
+gene_keep <- rowSums(count_tbl > 0) >= ceiling(perc_keep * ncol(count_tbl))
+count_tbl_low_rm <- count_tbl[gene_keep, ]
+```
+
+This keeps genes that are expressed (count > 0) in at least 80% of
+samples.
+
+## Creating Metadata
+
+```{r metadata}
+meta <- data.frame(SampleID = colnames(count_tbl),
+                    Treatment = c("KRAS_SPIB", "KRAS_SPIB", "KRAS", "KRAS"))
+rownames(meta) <- meta$SampleID
+```
+
+Update `Treatment` to match your actual sample groups and ensure the
+length matches `ncol(count_tbl)`.
+
+## Creating a DGE List
+
+```{r dge-list}
+dge <- DGEList(counts = count_tbl_low_rm, samples = meta)
+```
+
+## Normalization
+
+```{r normalize, fig.cap="Mean-variance trend after voom normalization"}
+dge <- calcNormFactors(dge, method = "TMM")
+dge_v <- voom(dge, plot = TRUE)
+
+# Save the dge_v object for later use
+saveRDS(dge_v, "dge_v.rds")
+```
+
+## Creating a PCA Plot
+
+A PCA plot visualizes the overall structure of the data and helps
+identify sample clustering, batch effects, or outliers. Samples from
+the same treatment group should tend to cluster together.
+
+```{r pca-plot, fig.width=7, fig.height=6}
+shape_column <- "Treatment"
+color_column <- "Treatment"
+label <- TRUE
+label_size <- 4
+plot_save_name <- "PCA_Plot.pdf"
+
+meta_table <- dge_v$targets
+count_table_t <- as.data.frame(t(dge_v$E))
+pca_prep <- prcomp(count_table_t, scale. = TRUE)
+
+pca_plot <- autoplot(pca_prep, label, shape = shape_column,
+                      data = meta_table, colour = color_column) +
+  geom_text_repel(aes(label = rownames(meta_table)), size = label_size) +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black"),
+        panel.grid.minor.y = element_blank(),
+        panel.grid.major.y = element_blank())
+
+pca_plot
+
+ggsave(plot_save_name, plot = pca_plot, device = "pdf",
+       units = "cm", width = 16, height = 14)
+```
+
+# Differential Expression Analysis
+
+Perform DE analysis using `limma`. **Special characters are not
+allowed in sample group names.**
+
+```{r deg-analysis}
+comparison <- "KRAS_SPIB-KRAS"
+
+design <- model.matrix(~ 0 + dge_v$targets[["Treatment"]])
+colnames(design) <- gsub(".*]]", "", colnames(design))
+
+contrast_matrix <- makeContrasts(contrasts = comparison, levels = design)
+
+fit <- lmFit(dge_v, design)
+fit_2 <- contrasts.fit(fit, contrast_matrix)
+fit_2 <- eBayes(fit_2)
+
+deg_tbl <- topTable(fit_2, coef = colnames(contrast_matrix), n = Inf,
+                     p.value = 1, lfc = 0, sort.by = "p")
+
+fwrite(deg_tbl, "DEG_P1_lfc0.tsv", sep = "\t", row.names = TRUE)
+
+head(deg_tbl)
+```
+
+This compares the `KRAS_SPIB` group to the `KRAS` group. Results are
+stored in `deg_tbl` and saved to `DEG_P1_lfc0.tsv` in the working
+directory.
+
+**Column definitions:**
+
+| Column | Meaning |
+|---|---|
+| `logFC` | log2 Fold Change |
+| `AveExpr` | Average expression level of the gene across all samples |
+| `t` | t-statistic — how strongly the gene is differentially expressed between conditions |
+| `P.Value` | p-value testing the null hypothesis of no difference in expression between groups |
+| `adj.P.Val` | p-value adjusted for multiple testing |
+| `B` | B-statistic (log-odds) — log-odds that a gene is differentially expressed |
+
+# Handling a GeneID + GeneSymbol annotation table
+
+If your count table has both a `GeneID` and a `GeneSymbol` column as
+the first two columns (and simply using `GeneSymbol` as row names
+causes a `duplicate 'row.names' are not allowed` error), use this
+approach instead:
+
+```{r geneid-genesymbol, eval=FALSE}
+# make a gene annotation table
+annot_tbl <- data.frame(GeneID = count_tbl[[1]], GeneSymbol = count_tbl[[2]])
+rownames(annot_tbl) <- annot_tbl[[1]]
+
+# remove the "GeneID" and "GeneSymbol" columns from your count table
+count_tbl <- count_tbl[, -c(1, 2)]
+
+# filter out low-expressed genes the same way as above
+gene_keep <- rowSums(count_tbl > 0) >= ceiling(perc_keep * ncol(count_tbl))
+count_tbl_low_rm <- count_tbl[gene_keep, ]
+
+# update the annotation table to match
+annot_tbl <- annot_tbl[rownames(count_tbl_low_rm), ]
+
+# create metadata table the same way as above
+
+# create a DGEList with the annotation table included
+dge <- DGEList(counts = count_tbl_low_rm, genes = annot_tbl, samples = meta)
+
+# the rest of the steps are the same
+```
+
+# Troubleshooting Notes
+
+- **`Error in .rowNamesDF<-(x, value = value): duplicate 'row.names' are not allowed`**
+  — usually caused by duplicate gene symbols when an extra `GeneID`
+  column is present. See [Handling a GeneID + GeneSymbol annotation table].
+- **`Error in taglist[[i]] : subscript out of bounds`** during
+  `readDGE()` — your featureCounts tables likely have a different
+  column structure than expected (columns 1 and 7, after skipping the
+  first row). Reformat your tables to match the expected structure.
+- **`Setting row names on a tibble is deprecated` / mismatched row
+  counts when building metadata** — make sure you're reading the
+  count table with `fread(..., data.table = FALSE)` (a base data
+  frame), not leaving it as a tibble, and that `SampleID` and
+  `Treatment` in `meta` have matching lengths.
+- **Low count filtering** — when filtering for a minimum count
+  threshold, apply it row-wise across samples (e.g.
+  `rowSums(counts >= 10) == ncol(counts)`), not by subsetting a single
+  row index. A construct like `dds[keep, ]` where `keep` is a scalar
+  (e.g. `keep = 10`) will incorrectly keep only that one row.
+
+# Conclusion
+
+You've completed the differential expression analysis of your RNAseq
+data. The resulting list of differentially expressed genes (DEGs)
+opens up many possibilities for deeper exploration, including
+functional enrichment analysis. Future steps typically include
+interpreting these results (e.g. volcano plots, GSEA/ORA pathway
+enrichment) and further downstream biological analyses.
+
+# References
+
+Burger T. Fudging the volcano-plot without dredging the data. *Nat
+Commun.* 2024 Feb 15;15(1):1392. doi: 10.1038/s41467-024-45834-7.
+PMID: 38360828; PMCID: PMC10869345.
