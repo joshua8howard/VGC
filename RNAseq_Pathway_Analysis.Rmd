@@ -1,0 +1,426 @@
+---
+title: "RNAseq Analysis: From DEGs to Pathways"
+subtitle: "Beginner's Workflow (Part 5) — GO, KEGG, and MSigDB Enrichment (GSEA and ORA)"
+author: "Dr. Lei Guo"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: cosmo
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Introduction
+
+After data preparation, statistical testing, and visualization (Parts
+3–4), the next step is to explore the biological significance of the
+differentially expressed genes (DEGs) — this is functional enrichment /
+pathway analysis.
+
+Pathway analysis helps you:
+
+- Connect expression changes to known biological mechanisms
+- Provide biological context for experimental findings
+- Generate hypotheses for further investigation
+
+# Pathway Databases
+
+## Gene Ontology (GO)
+
+A structured vocabulary describing gene functions, processes, and
+cellular locations, organized into three categories:
+
+- **Molecular Function (MF)** — specific molecular-level activities
+  (e.g. ATP binding, protein kinase activity)
+- **Biological Process (BP)** — broader biological goals involving
+  multiple molecular functions (e.g. cell cycle regulation, immune
+  response, apoptosis)
+- **Cellular Component (CC)** — where gene products are active within
+  the cell (e.g. nucleus, cytoplasm, mitochondrial membrane)
+
+## KEGG (Kyoto Encyclopedia of Genes and Genomes)
+
+Integrates genomic, chemical, and functional information:
+
+- **Pathways** — detailed maps of biological processes
+- **KEGG Orthology (KO)** — groups of genes with shared function across
+  species
+- **KEGG Disease** — disease pathways and gene–disease associations
+- **KEGG Drug and Enzyme** — drug interactions and metabolic enzyme
+  information
+- **KEGG Compound** — chemical compound structures and roles
+
+## Molecular Signatures Database (MSigDB)
+
+The most comprehensive pathway database, incorporating GO, KEGG, and
+more:
+
+- **Hallmark Gene Sets** — core biological processes and pathways
+- **Curated Gene Sets (C2)** — pathways from KEGG, Reactome, and
+  published studies
+- **Motif Gene Sets (C3)** — gene regulatory motifs
+- **Computational Gene Sets (C4)** — co-expression networks
+- **GO Gene Sets (C5)** — Gene Ontology groupings
+- **Oncogenic Signatures (C6)** — cancer-related pathways
+- **Immunologic Signatures (C7)** — immune system patterns
+- **Cell Type Signatures (C8)** — cell-specific expression patterns
+
+# Statistical Methods for Pathway Analysis
+
+## 1. Over-Representation Analysis (ORA)
+
+Uses statistical tests (typically Fisher's exact test or hypergeometric
+test) to evaluate gene set enrichment.
+
+**Advantages:** simple to understand and implement.
+
+**Limitations:** requires predefined cutoffs for DEG selection, treats
+all genes as equally important, doesn't consider expression change
+magnitude.
+
+## 2. Gene Set Enrichment Analysis (GSEA)
+
+Uses a running-sum statistic to analyze gene distribution patterns
+within a ranked list.
+
+**Advantages:** no arbitrary cutoffs needed, considers expression change
+magnitude, detects subtle expression patterns.
+
+**Limitations:** more computationally intensive, can be more complex to
+interpret.
+
+# Practical Implementation
+
+## Prerequisites
+
+```{r install-packages, eval=FALSE}
+# Install required packages if needed
+install.packages(c("BiocManager"))
+BiocManager::install(c("clusterProfiler", "org.Hs.eg.db", "org.Mm.eg.db",
+                        "org.Rn.eg.db", "pathview", "enrichplot", "DOSE"))
+
+install.packages(c("data.table", "ggplot2"))
+```
+
+## 1. Data Preparation
+
+### 1.1 Loading Required Libraries
+
+```{r load-packages}
+library(data.table)
+library(clusterProfiler)
+# library(org.Hs.eg.db)
+library(org.Mm.eg.db)
+# library(org.Rn.eg.db)
+library(ggplot2)
+library(DOSE)
+library(enrichplot)
+```
+
+Uncomment `org.Hs.eg.db` (human) or `org.Rn.eg.db` (rat) instead of
+`org.Mm.eg.db` (mouse) depending on your organism.
+
+### 1.2 Input Data Format
+
+Import the DEG table created in Part 3. For ORA, you need P-value and
+fold-change thresholds to filter DEGs. **GSEA does not require
+pre-filtering** — it analyzes the entire ranked gene list.
+
+```{r load-deg}
+deg <- fread("DEG_P1_lfc0.tsv")
+
+p_threshold <- 0.05
+fc_threshold <- 2
+```
+
+> **Note:** Throughout this tutorial, `deg$V1` refers to the gene
+> identifier column. If your gene ID column has a different name (e.g.
+> `Gene`), substitute it wherever `V1` appears below.
+
+## 2. Gene Set Enrichment Analysis (GSEA)
+
+### 2.1 GO Enrichment Analysis
+
+```{r gsea-go}
+# rank the DEGs by fold change
+deg_order_fc <- deg[order(-logFC)] # rank the genes by logFC, descending
+logfc <- deg_order_fc$logFC        # get logFC
+names(logfc) <- deg_order_fc$V1    # make a named vector of logFC
+
+# GSEA
+# Mouse: OrgDb = org.Mm.eg.db; Rat: OrgDb = org.Rn.eg.db; Human: OrgDb = org.Hs.eg.db
+enrich_go_gsea <- gseGO(geneList = logfc, OrgDb = org.Mm.eg.db, ont = "ALL",
+                         pvalueCutoff = 0.05, keyType = "SYMBOL", verbose = FALSE)
+
+# save the enrichment table
+enrich_go_gsea_df <- enrich_go_gsea@result
+
+fwrite(enrich_go_gsea_df, "enrich_go_gsea_df.tsv", sep = "\t")
+```
+
+### 2.2 Visualize the Top Enriched GO Terms
+
+The `clusterProfiler` package offers many visualization options. We
+start with a dot plot — the most widely used and intuitive
+representation. See the `clusterProfiler` documentation for more
+advanced options.
+
+```{r gsea-go-dotplot, fig.width=8, fig.height=8}
+dotplot_enrich_go_gsea <- dotplot(enrich_go_gsea, showCategory = 10, orderBy = "GeneRatio")
+
+dotplot_enrich_go_gsea
+
+ggsave("dotplot_enrich_go_gsea.png", dotplot_enrich_go_gsea,
+       device = "png", units = "cm", width = 16, height = 18)
+```
+
+GSEA results can also be visualized at the individual pathway level:
+
+```{r gsea-go-single-plot, fig.width=8, fig.height=7}
+# specify the GO term you want to plot (check enrich_go_gsea_df above)
+GOID <- "GO:0010634"
+
+gsea_plot <- gseaplot2(enrich_go_gsea, geneSetID = GOID,
+                        title = subset(enrich_go_gsea_df, ID == GOID)$Description)
+
+gsea_plot
+
+ggsave(paste0("gsea_plot_", gsub(":", "", GOID), ".png"), gsea_plot,
+       device = "png", units = "cm", width = 18, height = 16)
+```
+
+> Replace `GOID` with any GO term ID you're interested in from your own
+> `enrich_go_gsea_df` results.
+
+### 2.3 KEGG Enrichment Analysis
+
+Same workflow as above, but uses `gseKEGG()`. **KEGG requires Entrez
+IDs, not gene symbols**, so gene symbols must be converted first. Note
+the `organism` codes: `"hsa"` (human), `"mmu"` (mouse), `"rno"` (rat).
+
+```{r kegg-setup}
+# Load required annotation packages
+# Choose the organism-specific database that matches your dataset:
+#   - org.Mm.eg.db : Mouse
+#   - org.Hs.eg.db : Human
+#   - org.Rn.eg.db : Rat
+library(AnnotationDbi)
+library(org.Mm.eg.db)
+library(org.Rn.eg.db)
+library(org.Hs.eg.db)
+```
+
+```{r kegg-convert-ids}
+# ------------------------------------------------------------
+# 1. Convert gene symbols -> Entrez IDs using mapIds()
+# ------------------------------------------------------------
+# 'logfc' should be a named numeric vector where names = gene symbols.
+# We convert those gene symbols to Entrez IDs because KEGG requires Entrez IDs.
+entrez_ids <- mapIds(
+  x = org.Mm.eg.db,        # Change to org.Hs.eg.db (human) or org.Rn.eg.db (rat) as needed
+  keys = names(logfc),     # Input gene symbols
+  keytype = "SYMBOL",      # Type of input identifiers
+  column = "ENTREZID",     # Type of output identifiers
+  multiVals = "first"      # If multiple Entrez IDs map to one symbol, keep the first
+)
+
+# Replace gene symbol names with Entrez IDs
+names(logfc) <- entrez_ids
+
+# Remove genes that failed to map (NA Entrez IDs)
+logfc <- logfc[!is.na(names(logfc))]
+```
+
+```{r kegg-gsea, eval=FALSE}
+# ------------------------------------------------------------
+# 2. Run KEGG GSEA (gseKEGG) for different organisms
+# ------------------------------------------------------------
+# KEGG organism codes:
+#   - "mmu" : Mouse
+#   - "hsa" : Human
+#   - "rno" : Rat
+
+# Mouse KEGG GSEA
+enrich_kegg_gsea <- gseKEGG(
+  geneList = logfc,
+  organism = "mmu"
+)
+
+# Rat KEGG GSEA
+enrich_kegg_gsea <- gseKEGG(
+  geneList = logfc,
+  organism = "rno"
+)
+
+# Human KEGG GSEA
+enrich_kegg_gsea <- gseKEGG(
+  geneList = logfc,
+  organism = "hsa"
+)
+```
+
+> Run only the block matching your organism — the three calls above are
+> alternatives, not sequential steps (each one overwrites
+> `enrich_kegg_gsea`).
+
+## 3. Over-Representation Analysis (ORA)
+
+### 3.1 GO Enrichment Analysis
+
+ORA requires only a list of DEGs as input. This example focuses on
+up-regulated genes; the same process applies to down-regulated genes.
+
+```{r ora-go}
+# make a gene list
+deg_up <- deg[logFC > log2(fc_threshold) & adj.P.Val < p_threshold]$V1
+# deg_dn <- deg[logFC < -log2(fc_threshold) & adj.P.Val < p_threshold]$V1
+
+enrich_go_fet_up <- enrichGO(gene = deg_up, OrgDb = org.Mm.eg.db, keyType = "SYMBOL",
+                              ont = "ALL", pvalueCutoff = 0.05, pAdjustMethod = "BH",
+                              qvalueCutoff = 0.05)
+
+enrich_go_fet_up_df <- enrich_go_fet_up@result
+
+fwrite(enrich_go_fet_up_df, "enrich_go_fet_up_df.tsv", sep = "\t")
+```
+
+### 3.2 Visualize the Top Enriched GO Terms
+
+```{r ora-go-dotplot, fig.width=8, fig.height=8}
+# show the top 10 terms
+dotplot_enrich_go_fet_up <- dotplot(enrich_go_fet_up, showCategory = 10, orderBy = "GeneRatio")
+
+dotplot_enrich_go_fet_up
+
+ggsave("dotplot_enrich_go_fet_up.png", dotplot_enrich_go_fet_up,
+       device = "png", units = "cm", width = 16, height = 18)
+```
+
+### 3.3 KEGG Enrichment Analysis
+
+Same methodology as the GO enrichment above, but uses `enrichKEGG()`.
+Convert gene symbols to Entrez IDs first (see the [KEGG ID conversion
+step](#kegg-setup) above) — `enrichKEGG()` requires Entrez IDs, not
+symbols.
+
+```{r ora-kegg, eval=FALSE}
+enrich_kegg_fet_up <- enrichKEGG(
+  gene     = deg_up,     # Vector of Entrez IDs
+  organism = "mmu",      # Change to "hsa" (human) or "rno" (rat) as needed
+  keyType  = "kegg"      # Required when using Entrez IDs
+)
+```
+
+> **Important:** `deg_up` above is a vector of gene *symbols* as defined
+> in section 3.1. Before running `enrichKEGG()`, convert it to Entrez
+> IDs the same way `logfc` was converted in section 2.3, e.g.:
+>
+> ``` r
+> deg_up_entrez <- mapIds(org.Mm.eg.db, keys = deg_up, keytype = "SYMBOL",
+>                          column = "ENTREZID", multiVals = "first")
+> deg_up_entrez <- na.omit(deg_up_entrez)
+> ```
+>
+> then pass `gene = deg_up_entrez` to `enrichKEGG()`.
+
+## 4. MSigDB Enrichment
+
+The most comprehensive option — incorporates GO, KEGG, Hallmark,
+Reactome, and other pathway collections in one analysis.
+
+Before starting, download the appropriate gene set `.gmt` file from the
+MSigDB website (choose the species-specific file — mouse or human), and
+place it in your working directory or note its full path.
+
+### 4.1 The GSEA Method
+
+```{r msigdb-gsea, eval=FALSE}
+msigdb <- read.gmt("msigdb.v2024.1.Mm.symbols.gmt")
+
+enrich_msigdb_gsea <- GSEA(logfc, TERM2GENE = msigdb)
+
+enrich_msigdb_gsea_df <- enrich_msigdb_gsea@result
+
+fwrite(enrich_msigdb_gsea_df, "enrich_msigdb_gsea_df.tsv", sep = "\t")
+```
+
+### 4.2 The ORA Method
+
+```{r msigdb-ora, eval=FALSE}
+msigdb <- read.gmt("msigdb.v2024.1.Mm.symbols.gmt")
+
+enrich_msigdb_fet_up <- enricher(deg_up, TERM2GENE = msigdb)
+
+enrich_msigdb_fet_up_df <- enrich_msigdb_fet_up@result
+
+fwrite(enrich_msigdb_fet_up_df, "enrich_msigdb_fet_up_df.tsv", sep = "\t")
+```
+
+> Update the `.gmt` filename to match the species and MSigDB version you
+> downloaded (e.g. `msigdb.v2024.1.Hs.symbols.gmt` for human).
+
+# Results Interpretation
+
+**Statistical significance**
+
+- Examine adjusted p-values (FDR)
+- Consider gene set sizes
+- Look for consistent patterns across methods
+
+**Biological relevance**
+
+- Focus on pathways related to your experimental context
+- Consider pathway relationships and hierarchies
+- Look for unexpected but interesting connections
+
+**Technical considerations**
+
+- Account for gene set size effects
+- Verify multiple testing correction methods
+- Ensure appropriate background gene selection
+
+# Best Practices
+
+- Use appropriate statistical cutoffs consistently
+- Consider your experimental context when interpreting results
+- Validate key findings using alternative methods
+- Document all analysis parameters and software versions
+- Cross-reference findings with current literature
+- Consider pathway redundancy and overlap
+
+# Troubleshooting Notes
+
+- **`gseKEGG()`/`enrichKEGG()` error about needing Entrez IDs** — GO
+  functions (`gseGO`, `enrichGO`) accept gene symbols directly via
+  `keyType = "SYMBOL"`, but KEGG functions always require Entrez IDs.
+  Convert symbols to Entrez IDs with `mapIds()` (see section 2.3) before
+  calling any KEGG function.
+- **`NA` values after `mapIds()`** — not every gene symbol has a
+  matching Entrez ID. Always filter these out with
+  `logfc <- logfc[!is.na(names(logfc))]` (or the equivalent for a plain
+  vector) before running KEGG functions.
+- **Wrong organism database** — double-check that `OrgDb` (GO) and
+  `organism` (KEGG) match your actual species; mismatches will silently
+  return few or no enriched terms rather than an error.
+
+# References
+
+- Yu G, Wang LG, Han Y, He QY (2012). clusterProfiler: an R package for
+  comparing biological themes among gene clusters. *OMICS: A Journal of
+  Integrative Biology.*
+- Love MI, Huber W, Anders S (2014). Moderated estimation of fold change
+  and dispersion for RNA-seq data with DESeq2. *Genome Biology.*
+
+# Additional Resources
+
+- ClusterProfiler Documentation
+- GSEA Homepage
+- Bioconductor Workflow

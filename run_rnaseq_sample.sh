@@ -2,14 +2,18 @@
 set -uo pipefail
 
 # ============================================================
-# RNA-seq per-sample pipeline: trim -> align -> quantify
+# RNA-seq per-sample pipeline: trim -> align -> quantify -> multiqc
 # Usage: ./run_rnaseq_sample.sh
 #   (the script will interactively ask for the R1/R2 fastq
-#    files, the GTF annotation file, and the STAR genome
-#    index directory to use)
+#    files, the GTF annotation file, the STAR genome index
+#    directory, and the analysis directory to use)
 #
-# Non-interactive usage is also supported:
-#   ./run_rnaseq_sample.sh <R1.fastq.gz> <R2.fastq.gz> <annotation.gtf[.gz]> <star_index_dir>
+# Non-interactive usage is still supported:
+#   ./run_rnaseq_sample.sh <R1.fastq.gz> <R2.fastq.gz> <annotation.gtf[.gz]> <star_index_dir> <analysis_dir>
+#
+# All outputs (trimmed reads, alignments, counts, multiqc report)
+# are centralized under <analysis_dir>/{trimmed,aligned}/<SAMPLE>/
+# and <analysis_dir>/multiqc/
 # ============================================================
 
 # ---- Paths (edit these once if your layout changes) ----
@@ -123,10 +127,40 @@ prompt_for_dir() {
     done
 }
 
+# ---- Helper: prompt for an output directory. Creates it if it doesn't
+#      exist yet (after confirmation), since analysis dirs are often new. ----
+prompt_for_output_dir() {
+    local prompt_text="$1"
+    local path=""
+    local confirm=""
+    while true; do
+        read -e -p "${prompt_text}: " path
+        path="${path/#\~/$HOME}"   # expand leading ~
+        if [ -z "${path}" ]; then
+            echo -e "${C_YELLOW}  Please enter a path.${C_RESET}" >&2
+            continue
+        fi
+        if [ -d "${path}" ]; then
+            echo "${path}"
+            return 0
+        fi
+        read -e -p "  '${path}' does not exist. Create it? [Y/n]: " confirm
+        confirm="${confirm:-Y}"
+        if [[ "${confirm}" =~ ^[Yy] ]]; then
+            if mkdir -p "${path}"; then
+                echo "${path}"
+                return 0
+            else
+                echo -e "${C_YELLOW}  Could not create '${path}'. Please try a different path.${C_RESET}" >&2
+            fi
+        fi
+    done
+}
+
 # ---- Pre-flight: make sure required tools are installed ----
 check_dependencies() {
     local missing=()
-    for tool in trim_galore STAR featureCounts; do
+    for tool in trim_galore STAR featureCounts multiqc; do
         if ! command -v "${tool}" >/dev/null 2>&1; then
             missing+=("${tool}")
         fi
@@ -141,25 +175,29 @@ check_dependencies() {
 CURRENT_STEP="Checking dependencies"
 check_dependencies
 
-# ---- Get R1, R2, GTF, and STAR genome index either from args or interactively ----
+# ---- Get R1, R2, GTF, STAR genome index, and analysis dir either from args or interactively ----
 CURRENT_STEP="Collecting inputs"
-if [ $# -eq 4 ]; then
+if [ $# -eq 5 ]; then
     R1="$1"
     R2="$2"
     GTF="$3"
     STAR_INDEX="$4"
+    ANALYSIS_DIR="$5"
 else
     echo -e "${C_BOLD}=== RNA-seq Pipeline Setup ===${C_RESET}"
     R1=$(prompt_for_file "Path to R1 (forward) fastq.gz file")
     R2=$(prompt_for_file "Path to R2 (reverse) fastq.gz file")
     GTF=$(prompt_for_file "Path to GTF annotation file (.gtf or .gtf.gz)")
     STAR_INDEX=$(prompt_for_dir "Path to STAR genome index directory")
+    ANALYSIS_DIR=$(prompt_for_output_dir "Path to analysis directory (outputs will be centralized here)")
 fi
 
 [ -f "${R1}" ]  || fail "R1 file not found: ${R1}"
 [ -f "${R2}" ]  || fail "R2 file not found: ${R2}"
 [ -f "${GTF}" ] || fail "GTF file not found: ${GTF}"
 [ -d "${STAR_INDEX}" ] || fail "STAR index directory not found: ${STAR_INDEX}"
+[ -n "${ANALYSIS_DIR}" ] || fail "Analysis directory not provided."
+mkdir -p "${ANALYSIS_DIR}" || fail "Could not create analysis directory: ${ANALYSIS_DIR}"
 
 # ---- Derive a sample name from the R1 filename ----
 # Strips common suffixes like _1.fastq.gz, _R1_001.fastq.gz, etc.
@@ -168,20 +206,23 @@ SAMPLE="${SAMPLE%.fastq.gz}"
 SAMPLE="${SAMPLE%.fq.gz}"
 SAMPLE=$(echo "${SAMPLE}" | sed -E 's/(_R?1)(_001)?$//')
 
-TRIM_DIR=~/trimmed/${SAMPLE}
-ALIGN_DIR=~/aligned/${SAMPLE}
+# ---- All outputs live under the centralized analysis directory ----
+TRIM_DIR="${ANALYSIS_DIR}/trimmed/${SAMPLE}"
+ALIGN_DIR="${ANALYSIS_DIR}/aligned/${SAMPLE}"
+MULTIQC_DIR="${ANALYSIS_DIR}/multiqc"
 LOG_DIR="${ALIGN_DIR}/logs"
 
 # ---- Make sure output directories exist ----
-mkdir -p "${TRIM_DIR}" "${ALIGN_DIR}" "${LOG_DIR}"
+mkdir -p "${TRIM_DIR}" "${ALIGN_DIR}" "${LOG_DIR}" "${MULTIQC_DIR}"
 
 echo ""
 echo -e "${C_BOLD}Sample name detected: ${SAMPLE}${C_RESET}"
-echo "R1:         ${R1}"
-echo "R2:         ${R2}"
-echo "GTF:        ${GTF}"
-echo "STAR index: ${STAR_INDEX}"
-echo "Logs:       ${LOG_DIR}"
+echo "R1:            ${R1}"
+echo "R2:            ${R2}"
+echo "GTF:           ${GTF}"
+echo "STAR index:    ${STAR_INDEX}"
+echo "Analysis dir:  ${ANALYSIS_DIR}"
+echo "Logs:          ${LOG_DIR}"
 echo ""
 
 # ============================================================
@@ -225,10 +266,20 @@ run_step "3_Quantification" featureCounts -T "${THREADS_FC}" -t exon -g gene_nam
 [ -s "${ALIGN_DIR}/featureCounts_exon.txt" ] || fail "featureCounts output missing or empty."
 
 # ============================================================
+# Step 4: Aggregate QC report with MultiQC
+# ============================================================
+run_step "4_MultiQC" multiqc "${ANALYSIS_DIR}" \
+    --outdir "${MULTIQC_DIR}" \
+    --force
+
+[ -f "${MULTIQC_DIR}/multiqc_report.html" ] || fail "multiqc_report.html not found in ${MULTIQC_DIR}"
+
+# ============================================================
 # Done
 # ============================================================
 TOTAL_DURATION=$(format_duration $(( $(date +%s) - SCRIPT_START_TIME )))
 echo ""
 echo -e "${C_GREEN}${C_BOLD}=== [${SAMPLE}] All steps completed successfully in ${TOTAL_DURATION} ===${C_RESET}"
-echo "Counts file: ${ALIGN_DIR}/featureCounts_exon.txt"
-echo "Per-step logs: ${LOG_DIR}/"
+echo "Counts file:    ${ALIGN_DIR}/featureCounts_exon.txt"
+echo "MultiQC report: ${MULTIQC_DIR}/multiqc_report.html"
+echo "Per-step logs:  ${LOG_DIR}/"
