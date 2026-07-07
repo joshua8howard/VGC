@@ -22,19 +22,18 @@ knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
 
 This workflow picks up after you have generated a gene expression count
 matrix from raw sequencing data (see Parts 1 and 2 of the series, which
-cover processing FASTQ files into a count matrix). Here we move from
-the Linux environment into R to perform differential expression (DE)
-analysis, data visualization, and other downstream statistical
-analyses.
+cover processing FASTQ files into a count matrix). Here we move from the
+Linux environment into R to perform differential expression (DE)
+analysis, data visualization, and other downstream statistical analyses.
 
 # Installing R and RStudio
 
 Installation is done outside of this script:
 
-1. **Install R** — download the latest version for your OS from the
-   official R website and follow the installer prompts.
-2. **Install RStudio** — download the appropriate version from the
-   RStudio download page and install it like any other application.
+1.  **Install R** — download the latest version for your OS from the
+    official R website and follow the installer prompts.
+2.  **Install RStudio** — download the appropriate version from the
+    RStudio download page and install it like any other application.
 
 RStudio provides:
 
@@ -44,8 +43,7 @@ RStudio provides:
   errors, and print statements.
 - **Work Space Window** — lists all objects in your current session
   (variables, data sets, functions).
-- **Plot & Files Window** — view, export, or zoom into generated
-  plots.
+- **Plot & Files Window** — view, export, or zoom into generated plots.
 
 # Setting Up Your R Environment
 
@@ -89,10 +87,10 @@ directory. All outputs will be saved here unless otherwise specified.
 
 ```{r set-wd, eval=FALSE}
 # MacOS
-setwd("/Users/yourusername/Documents/RNAseq")
+# setwd("/Users/yourusername/Documents/RNAseq")
 
 # Windows
-setwd("C:\\Users\\yourusername\\Documents\\RNAseq")
+setwd("//wsl.localhost/Ubuntu/home/unixuser/rnaseq_output/counts/")
 ```
 
 Replace `yourusername` with your actual username.
@@ -108,6 +106,7 @@ expression matrix, do so as follows:
 
 ```{r build-count-matrix, eval=FALSE}
 # Retrieve count file paths
+count_file_path <- ("//wsl.localhost/Ubuntu/home/unixuser/rnaseq_output/counts/")
 file_names <- list.files(count_file_path,
                           pattern = "featureCounts_exon\\.txt$",
                           recursive = TRUE, full.names = TRUE)
@@ -138,13 +137,16 @@ in the Work Space window.
 ### Add row names to the count table
 
 ```{r rownames}
-rownames(count_tbl) <- count_tbl[[1]]
-count_tbl <- count_tbl[, -1]
+rownames(count_tbl) <- rownames(counts_raw)
+#Old code do not use
+#rownames(count_tbl) <- count_tbl[[1]]
+#count_tbl <- count_tbl[, -1]
 ```
 
-> **Note:** If your table has separate `GeneID` and `GeneSymbol`
-> columns (rather than a single identifier column), see the
-> [Handling a GeneID + GeneSymbol annotation table] section below
+> **Note:** If your table has separate `GeneID` and `GeneSymbol` columns
+> (rather than a single identifier column), see the [Handling a GeneID +
+> GeneSymbol annotation
+> table](#handling-a-geneid-genesymbol-annotation-table) section below
 > before proceeding, to avoid duplicate row name errors.
 
 ### Filtering low-expressed genes
@@ -155,7 +157,7 @@ gene_keep <- rowSums(count_tbl > 0) >= ceiling(perc_keep * ncol(count_tbl))
 count_tbl_low_rm <- count_tbl[gene_keep, ]
 ```
 
-This keeps genes that are expressed (count > 0) in at least 80% of
+This keeps genes that are expressed (count \> 0) in at least 80% of
 samples.
 
 ## Creating Metadata
@@ -188,8 +190,8 @@ saveRDS(dge_v, "dge_v.rds")
 ## Creating a PCA Plot
 
 A PCA plot visualizes the overall structure of the data and helps
-identify sample clustering, batch effects, or outliers. Samples from
-the same treatment group should tend to cluster together.
+identify sample clustering, batch effects, or outliers. Samples from the
+same treatment group should tend to cluster together.
 
 ```{r pca-plot, fig.width=7, fig.height=6}
 shape_column <- "Treatment"
@@ -220,8 +222,8 @@ ggsave(plot_save_name, plot = pca_plot, device = "pdf",
 
 # Differential Expression Analysis
 
-Perform DE analysis using `limma`. **Special characters are not
-allowed in sample group names.**
+Perform DE analysis using `limma`. **Special characters are not allowed
+in sample group names.**
 
 ```{r deg-analysis}
 comparison <- "KRAS_SPIB-KRAS"
@@ -250,7 +252,7 @@ directory.
 **Column definitions:**
 
 | Column | Meaning |
-|---|---|
+|------------------------------------|------------------------------------|
 | `logFC` | log2 Fold Change |
 | `AveExpr` | Average expression level of the gene across all samples |
 | `t` | t-statistic — how strongly the gene is differentially expressed between conditions |
@@ -258,12 +260,12 @@ directory.
 | `adj.P.Val` | p-value adjusted for multiple testing |
 | `B` | B-statistic (log-odds) — log-odds that a gene is differentially expressed |
 
-# Handling a GeneID + GeneSymbol annotation table
+# Handling a GeneID + GeneSymbol annotation table {#handling-a-geneid-genesymbol-annotation-table}
 
-If your count table has both a `GeneID` and a `GeneSymbol` column as
-the first two columns (and simply using `GeneSymbol` as row names
-causes a `duplicate 'row.names' are not allowed` error), use this
-approach instead:
+If your count table has both a `GeneID` and a `GeneSymbol` column as the
+first two columns (and simply using `GeneSymbol` as row names causes a
+`duplicate 'row.names' are not allowed` error), use this approach
+instead:
 
 ```{r geneid-genesymbol, eval=FALSE}
 # make a gene annotation table
@@ -292,16 +294,17 @@ dge <- DGEList(counts = count_tbl_low_rm, genes = annot_tbl, samples = meta)
 
 - **`Error in .rowNamesDF<-(x, value = value): duplicate 'row.names' are not allowed`**
   — usually caused by duplicate gene symbols when an extra `GeneID`
-  column is present. See [Handling a GeneID + GeneSymbol annotation table].
+  column is present. See [Handling a GeneID + GeneSymbol annotation
+  table](#handling-a-geneid-genesymbol-annotation-table).
 - **`Error in taglist[[i]] : subscript out of bounds`** during
-  `readDGE()` — your featureCounts tables likely have a different
-  column structure than expected (columns 1 and 7, after skipping the
-  first row). Reformat your tables to match the expected structure.
+  `readDGE()` — your featureCounts tables likely have a different column
+  structure than expected (columns 1 and 7, after skipping the first
+  row). Reformat your tables to match the expected structure.
 - **`Setting row names on a tibble is deprecated` / mismatched row
-  counts when building metadata** — make sure you're reading the
-  count table with `fread(..., data.table = FALSE)` (a base data
-  frame), not leaving it as a tibble, and that `SampleID` and
-  `Treatment` in `meta` have matching lengths.
+  counts when building metadata** — make sure you're reading the count
+  table with `fread(..., data.table = FALSE)` (a base data frame), not
+  leaving it as a tibble, and that `SampleID` and `Treatment` in `meta`
+  have matching lengths.
 - **Low count filtering** — when filtering for a minimum count
   threshold, apply it row-wise across samples (e.g.
   `rowSums(counts >= 10) == ncol(counts)`), not by subsetting a single
@@ -311,14 +314,14 @@ dge <- DGEList(counts = count_tbl_low_rm, genes = annot_tbl, samples = meta)
 # Conclusion
 
 You've completed the differential expression analysis of your RNAseq
-data. The resulting list of differentially expressed genes (DEGs)
-opens up many possibilities for deeper exploration, including
-functional enrichment analysis. Future steps typically include
-interpreting these results (e.g. volcano plots, GSEA/ORA pathway
-enrichment) and further downstream biological analyses.
+data. The resulting list of differentially expressed genes (DEGs) opens
+up many possibilities for deeper exploration, including functional
+enrichment analysis. Future steps typically include interpreting these
+results (e.g. volcano plots, GSEA/ORA pathway enrichment) and further
+downstream biological analyses.
 
 # References
 
 Burger T. Fudging the volcano-plot without dredging the data. *Nat
-Commun.* 2024 Feb 15;15(1):1392. doi: 10.1038/s41467-024-45834-7.
-PMID: 38360828; PMCID: PMC10869345.
+Commun.* 2024 Feb 15;15(1):1392. doi: 10.1038/s41467-024-45834-7. PMID:
+38360828; PMCID: PMC10869345.

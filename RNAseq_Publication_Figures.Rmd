@@ -129,8 +129,8 @@ ggsave(
   volcano_plot,
   device = "png",
   units = "cm",
-  width = 32,
-  height = 32
+  width = 12,
+  height = 16
 )
 ```
 
@@ -154,8 +154,17 @@ deg_tbl$significance <- ifelse(
   "Non-Significant"
 )
 
-# Select top genes to label
-genes_to_label <- deg_tbl[order(deg_tbl$adj.P.Val)]$V1[1:15]
+# 1. Order the entire table by statistical significance first
+ordered_tbl <- deg_tbl[order(deg_tbl$adj.P.Val), ]
+
+# 2. Extract the top 15 upregulated genes (logFC > 0)
+up_genes <- ordered_tbl$V1[ordered_tbl$logFC > 0][1:15]
+
+# 3. Extract the top 15 downregulated genes (logFC < 0)
+down_genes <- ordered_tbl$V1[ordered_tbl$logFC < 0][1:15]
+
+# 4. Combine them into a single vector for labeling
+genes_to_label <- c(up_genes, down_genes)
 
 # Create enhanced volcano plot
 custom_volcano <- ggplot(deg_tbl, aes(x = logFC, y = neg_log10_adj.P.Val)) +

@@ -701,58 +701,64 @@ run_sort_index() {
 }
 
 # run_quant
-#   Runs featureCounts ONCE across all samples' BAM files together
-#   (this is how featureCounts is normally used — it produces one
-#   combined count matrix with one column per BAM/sample).
+#   Runs featureCounts once per sample so each aligned BAM gets its
+#   own exon-level count file alongside the alignment output.
 run_quant() {
     log "Running featureCounts across all samples..."
     mkdir -p "${OUTDIR}/counts"
 
-    local paired_end=0
     for s in "${SAMPLE_NAMES[@]}"; do
+        local bam_files=()
+        local bam
+
+        while IFS= read -r bam; do
+            [[ -n "$bam" ]] && bam_files+=("$bam")
+        done < <(find "${OUTDIR}/aligned/${s}" -maxdepth 1 -type f -name "*.bam" | sort)
+
+        if [[ ${#bam_files[@]} -eq 0 ]]; then
+            warn "[$s] No BAM files found for quantification — skipping featureCounts."
+            continue
+        fi
+
+        if [[ ${#bam_files[@]} -gt 1 ]]; then
+            warn "[$s] Multiple BAM files found; using ${bam_files[0]}"
+        fi
+
+        bam="${bam_files[0]}"
+
+        local out_file="${OUTDIR}/counts/${s}_featureCounts_exon.txt"
+
         if [[ -n "${SAMPLE_R2[$s]:-}" ]]; then
-            paired_end=1
-            break
+            log "[$s] Counting paired-end reads with featureCounts..."
+            # featureCounts
+            #   -T : number of threads
+            #   -t : feature type to count (exon)
+            #   -g : attribute to group by in the GTF (gene_name)
+            #   -s : strand-specificity mode (0 = unstranded)
+            #   -p : count paired-end fragments instead of single reads
+            #   -B : require both ends of each pair to be properly aligned
+            #   -C : ignore chimeric fragments with mates on different chromosomes
+            #   -a : path to the GTF annotation file
+            #   -o : output file path for the count table
+            featureCounts -T "$THREADS" -t exon -g gene_name -s 0 -p -B -C \
+                -a "$GTF_FILE" \
+                -o "$out_file" \
+                "$bam"
+        else
+            log "[$s] Counting single-end reads with featureCounts..."
+            # featureCounts
+            #   -T : number of threads
+            #   -t : feature type to count (exon)
+            #   -g : attribute to group by in the GTF (gene_name)
+            #   -s : strand-specificity mode (0 = unstranded)
+            #   -a : path to the GTF annotation file
+            #   -o : output file path for the count table
+            featureCounts -T "$THREADS" -t exon -g gene_name -s 0 \
+                -a "$GTF_FILE" \
+                -o "$out_file" \
+                "$bam"
         fi
     done
-
-    # Collect every BAM file produced by the alignment step, across
-    # all samples, into a single array to pass to featureCounts.
-    local bams=()
-    for s in "${SAMPLE_NAMES[@]}"; do
-        local bam="${OUTDIR}/aligned/${s}"/*.bam
-        for f in $bam; do
-            [[ -f "$f" ]] && bams+=("$f")
-        done
-    done
-
-    if [[ ${#bams[@]} -eq 0 ]]; then
-        warn "No BAM files found for quantification — skipping featureCounts."
-        return
-    fi
-
-    if [[ "$paired_end" -eq 1 ]]; then
-        log "Detected paired-end libraries — counting read pairs with featureCounts."
-    else
-        log "Detected single-end libraries — counting reads with featureCounts."
-    fi
-
-    # featureCounts
-    #   -T : number of threads
-    #   -p : count paired-end fragments instead of single reads
-    #   -B : require both ends of a pair to be successfully aligned
-    #   -C : exclude chimeric fragments with mates on different chromosomes
-    #   -a : path to the GTF annotation file (defines gene/exon coordinates)
-    #   -o : output count matrix file path
-    #   <bams...> : one or more input BAM files (each becomes a column
-    #               in the output count table)
-    if [[ "$paired_end" -eq 1 ]]; then
-        featureCounts -T "$THREADS" -p -B -C -a "$GTF_FILE" \
-            -o "${OUTDIR}/counts/featureCounts_gene.txt" "${bams[@]}"
-    else
-        featureCounts -T "$THREADS" -a "$GTF_FILE" \
-            -o "${OUTDIR}/counts/featureCounts_gene.txt" "${bams[@]}"
-    fi
 }
 
 # run_multiqc
