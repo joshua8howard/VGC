@@ -48,6 +48,16 @@ library(pheatmap)        # For creating heatmaps
 library(EnhancedVolcano) # For volcano plots
 ```
 
+If you want to use the ComplexHeatmap section below, install these
+packages first:
+
+```{r install-complexheatmap, eval=FALSE}
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+BiocManager::install(c("ComplexHeatmap", "circlize"))
+```
+
 # Loading Differential Expression Results
 
 These files (`DEG_P1_lfc0.tsv` and `dge_v.rds`) were generated at the
@@ -114,7 +124,7 @@ volcano_plot <- EnhancedVolcano(
   colCustom = keyvals.colour_rd,
   axisLabSize = 20,
   labSize = 3,
-  legendLabSize = 16,
+  legendLabSize = 8,
   legendIconSize = 7,
   captionLabSize = 16,
   colAlpha = 1,
@@ -129,8 +139,8 @@ ggsave(
   volcano_plot,
   device = "png",
   units = "cm",
-  width = 12,
-  height = 16
+  width = 32,
+  height = 32
 )
 ```
 
@@ -199,6 +209,47 @@ custom_volcano <- ggplot(deg_tbl, aes(x = logFC, y = neg_log10_adj.P.Val)) +
 custom_volcano
 ```
 
+## Top Differentially Expressed Genes Table
+
+This table shows the strongest 15 upregulated and 15 downregulated genes
+based on adjusted p-value within each direction.
+
+```{r top-deg-table, results='asis'}
+gene_id_col <- if ("V1" %in% names(deg_tbl)) "V1" else names(deg_tbl)[1]
+
+top_up_genes <- deg_tbl %>%
+  filter(logFC > 0) %>%
+  arrange(adj.P.Val) %>%
+  slice_head(n = 15) %>%
+  transmute(
+    Direction = "Upregulated",
+    Gene = .data[[gene_id_col]],
+    logFC = round(logFC, 3),
+    adj.P.Val = signif(adj.P.Val, 3),
+    AveExpr = round(AveExpr, 3)
+  )
+
+top_down_genes <- deg_tbl %>%
+  filter(logFC < 0) %>%
+  arrange(adj.P.Val) %>%
+  slice_head(n = 15) %>%
+  transmute(
+    Direction = "Downregulated",
+    Gene = .data[[gene_id_col]],
+    logFC = round(logFC, 3),
+    adj.P.Val = signif(adj.P.Val, 3),
+    AveExpr = round(AveExpr, 3)
+  )
+
+top_deg_table <- bind_rows(top_up_genes, top_down_genes)
+
+knitr::kable(
+  top_deg_table,
+  caption = "Top 15 Upregulated and Top 15 Downregulated Genes",
+  align = "lrrrr"
+)
+```
+
 # Creating Informative Heatmaps
 
 Heatmaps are excellent for visualizing expression patterns across
@@ -232,6 +283,57 @@ heatmap_custom <- pheatmap(
 )
 ```
 
+## Alternative Heatmap with ComplexHeatmap
+
+This version gives you more control over clustering, annotations, and
+publication styling.
+
+```{r complexheatmap, fig.width=7, fig.height=7}
+if (!requireNamespace("ComplexHeatmap", quietly = TRUE) ||
+    !requireNamespace("circlize", quietly = TRUE)) {
+  message("Install ComplexHeatmap and circlize to render this heatmap block.")
+} else {
+# Row-scale the expression matrix for visual comparison across samples
+expr_deg_scaled <- t(scale(t(expr_deg)))
+expr_deg_scaled[is.na(expr_deg_scaled)] <- 0
+
+# Build a named color map for the treatment annotation
+treatment_levels <- unique(col_annot_df$Treatment)
+treatment_colors <- setNames(c("steelblue", "tomato")[seq_along(treatment_levels)], treatment_levels)
+
+sample_annotation <- ComplexHeatmap::HeatmapAnnotation(
+  Treatment = col_annot_df$Treatment,
+  col = list(Treatment = treatment_colors)
+)
+
+heatmap_colors <- circlize::colorRamp2(
+  c(min(expr_deg_scaled, na.rm = TRUE), 0, max(expr_deg_scaled, na.rm = TRUE)),
+  c("navy", "white", "firebrick")
+)
+
+heatmap_complex <- ComplexHeatmap::Heatmap(
+  expr_deg_scaled,
+  name = "Z-score",
+  col = heatmap_colors,
+  top_annotation = sample_annotation,
+  cluster_rows = TRUE,
+  cluster_columns = FALSE,
+  show_row_names = FALSE,
+  show_column_names = TRUE,
+  row_dend_side = "left",
+  column_split = col_annot_df$Treatment,
+  column_title = "Differential Expression Heatmap",
+  heatmap_legend_param = list(title = "Row Z-score")
+)
+
+ComplexHeatmap::draw(
+  heatmap_complex,
+  heatmap_legend_side = "right",
+  annotation_legend_side = "right"
+)
+}
+```
+
 ### Saving the heatmap to PDF
 
 `pheatmap` objects need a small helper function to save cleanly to PDF:
@@ -258,12 +360,22 @@ effective ways to do that.
 gene_to_plot <- "Dclk1"  # Replace with your gene of interest
 
 # Transform all gene expression values to positive (needed for some plot types)
-dge_v$E <- dge_v$E + abs(min(dge_v$E)) + 1
+# dge_v$E <- dge_v$E + abs(min(dge_v$E)) + 1
 
 gene_data <- data.frame(
   Treatment = dge_v$targets$Treatment,
   Expression = dge_v$E[gene_to_plot, ]
 )
+
+# Keep treatment order stable in the plots
+gene_data$Treatment <- factor(gene_data$Treatment, levels = unique(gene_data$Treatment))
+
+# Quick sanity check: inspect the mean expression by group before interpreting direction
+gene_summary <- gene_data %>%
+  group_by(Treatment) %>%
+  summarise(mean_expression = mean(Expression), .groups = "drop")
+
+gene_summary
 ```
 
 ## 1. Violin Plots: Showing Distribution and Individual Points
@@ -271,7 +383,7 @@ gene_data <- data.frame(
 ```{r violin-plot, fig.width=5, fig.height=5}
 violin_plot <- ggplot(gene_data, aes(x = Treatment, y = Expression)) +
   geom_violin(aes(fill = Treatment), alpha = 0.7) +
-  geom_jitter(width = 0.2, alpha = 0.6) +
+  geom_jitter(width = 0.2, alpha = 1.0) +
   stat_summary(fun = mean, geom = "point", size = 3, color = "black") +
   stat_summary(fun.data = mean_se, geom = "errorbar", width = 0.2) +
   theme_minimal() +
@@ -284,14 +396,15 @@ violin_plot
 ## 2. Box Plots: Traditional and Clear
 
 ```{r box-plot, fig.width=5, fig.height=5}
-box_plot <- ggplot(gene_data, aes(x = Treatment, y = Expression)) +
-  geom_boxplot(aes(fill = Treatment), alpha = 0.7) +
-  geom_jitter(width = 0.2, alpha = 0.6) +
-  theme_minimal() +
-  labs(title = paste(gene_to_plot, "Expression"), y = "log2 Expression") +
-  theme(legend.position = "none")
+boxplot <- ggplot(gene_data, aes(x = Treatment, y = Expression)) + 
+  geom_boxplot(aes(fill = Treatment), alpha = 0.7) + 
+  geom_jitter(width = 0.2, alpha = 0.6) + 
+  scale_fill_manual(values = c(treatment_colors[2], treatment_colors[1])) +
+  theme_minimal() + 
+  labs(title = paste(gene_to_plot, "Expression"), y = "log2 Expression") + 
+  theme(legend.position = "none") 
 
-box_plot
+boxplot
 ```
 
 ## 3. Bar Plots: Showing Means with Error Bars

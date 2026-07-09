@@ -57,7 +57,8 @@ if (!require("BiocManager", quietly = TRUE))
   install.packages("BiocManager")
 
 BiocManager::install(c("sva", "edgeR", "limma", "Biobase", "biomaRt",
-                        "clusterProfiler", "EnhancedVolcano", "org.Hs.eg.db",
+                        "clusterProfiler", "EnhancedVolcano", "ComplexHeatmap",
+                        "circlize", "org.Hs.eg.db",
                         "org.Mm.eg.db", "org.Rn.eg.db"))
 
 install.packages(c("data.table", "readxl", "stringr", "ggplot2", "ggrepel",
@@ -164,12 +165,13 @@ samples.
 
 ```{r metadata}
 meta <- data.frame(SampleID = colnames(count_tbl),
-                    Treatment = c("KRAS_SPIB", "KRAS_SPIB", "KRAS", "KRAS"))
+                    Treatment = c("KRAS", "KRAS", "KRAS_SPIB", "KRAS_SPIB"))
 rownames(meta) <- meta$SampleID
 ```
 
 Update `Treatment` to match your actual sample groups and ensure the
-length matches `ncol(count_tbl)`.
+length matches `ncol(count_tbl)`. If the sample order is reversed, swap
+the labels here before regenerating `dge_v.rds` and the DEG table.
 
 ## Creating a DGE List
 
@@ -226,6 +228,8 @@ Perform DE analysis using `limma`. **Special characters are not allowed
 in sample group names.**
 
 ```{r deg-analysis}
+# Contrast order matters: logFC is computed as the first group minus the second.
+# If you want the opposite biological direction, swap the order here.
 comparison <- "KRAS_SPIB-KRAS"
 
 design <- model.matrix(~ 0 + dge_v$targets[["Treatment"]])
@@ -249,10 +253,13 @@ This compares the `KRAS_SPIB` group to the `KRAS` group. Results are
 stored in `deg_tbl` and saved to `DEG_P1_lfc0.tsv` in the working
 directory.
 
+If the source paper reports the reverse direction, use `KRAS-KRAS_SPIB`
+instead so the sign of `logFC` matches the paper's convention.
+
 **Column definitions:**
 
 | Column | Meaning |
-|------------------------------------|------------------------------------|
+|----|----|
 | `logFC` | log2 Fold Change |
 | `AveExpr` | Average expression level of the gene across all samples |
 | `t` | t-statistic — how strongly the gene is differentially expressed between conditions |
