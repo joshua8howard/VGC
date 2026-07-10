@@ -360,7 +360,7 @@ effective ways to do that.
 gene_to_plot <- "Dclk1"  # Replace with your gene of interest
 
 # Transform all gene expression values to positive (needed for some plot types)
-# dge_v$E <- dge_v$E + abs(min(dge_v$E)) + 1
+dge_v$E <- dge_v$E + abs(min(dge_v$E)) + 1
 
 gene_data <- data.frame(
   Treatment = dge_v$targets$Treatment,
