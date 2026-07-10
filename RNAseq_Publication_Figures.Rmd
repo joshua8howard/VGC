@@ -308,7 +308,7 @@ sample_annotation <- ComplexHeatmap::HeatmapAnnotation(
 
 heatmap_colors <- circlize::colorRamp2(
   c(min(expr_deg_scaled, na.rm = TRUE), 0, max(expr_deg_scaled, na.rm = TRUE)),
-  c("navy", "white", "firebrick")
+  c("steelblue", "white", "tomato")
 )
 
 heatmap_complex <- ComplexHeatmap::Heatmap(
@@ -386,7 +386,8 @@ violin_plot <- ggplot(gene_data, aes(x = Treatment, y = Expression)) +
   geom_jitter(width = 0.2, alpha = 1.0) +
   stat_summary(fun = mean, geom = "point", size = 3, color = "black") +
   stat_summary(fun.data = mean_se, geom = "errorbar", width = 0.2) +
-  theme_minimal() +
+  scale_fill_manual(values = c(treatment_colors[2], treatment_colors[1])) +
+  theme_minimal() + 
   labs(title = paste(gene_to_plot, "Expression"), y = "log2 Expression") +
   theme(legend.position = "none")
 
@@ -422,7 +423,8 @@ summary_data <- gene_data %>%
 bar_plot <- ggplot(summary_data, aes(x = Treatment, y = mean, fill = Treatment)) +
   geom_bar(stat = "identity", alpha = 0.7) +
   geom_errorbar(aes(ymin = mean - se, ymax = mean + se), width = 0.2) +
-  theme_minimal() +
+  scale_fill_manual(values = c(treatment_colors[2], treatment_colors[1])) +
+  theme_minimal() + 
   labs(title = paste(gene_to_plot, "Expression"), y = "Mean log2 Expression") +
   theme(legend.position = "none")
 
