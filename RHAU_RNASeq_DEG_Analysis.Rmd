@@ -35,7 +35,7 @@ if (!requireNamespace("BiocManager", quietly = TRUE)) {
 }
 
 BiocManager::install(c("edgeR", "limma", "AnnotationDbi", "org.Mm.eg.db"))
-install.packages(c("data.table", "ggplot2", "ggrepel", "ggfortify", "statmod"))
+install.packages(c("data.table", "ggplot2", "ggrepel", "ggfortify", "statmod", "pheatmap", "dplyr"))
 ```
 
 # Load Packages
@@ -49,6 +49,8 @@ library(limma)
 library(ggplot2)
 library(ggrepel)
 library(ggfortify)
+library(pheatmap)
+library(dplyr)
 ```
 
 # Read Count Table
@@ -102,6 +104,11 @@ meta <- data.frame(
 
 rownames(meta) <- meta$SampleID
 meta$Subject <- factor(meta$Subject)
+
+# Consistent color mapping used across all plots below.
+# Named by factor level so ggplot always matches the right color to the
+# right group, regardless of row order or how a data frame gets sorted.
+treatment_colors <- c(WT = "blue", RHAU = "red")
 ```
 
 The sample names determine both treatment and subject pairing, so the
@@ -111,7 +118,7 @@ design stays aligned even if the columns are reordered.
 
 ```{r dge-object}
 dge <- DGEList(counts = count_tbl, samples = meta)
-dge <- calcNormFactors(dge, method = "TMM")
+dge <- normLibSizes(dge, method = "TMM")
 ```
 
 # Filter Low-Expression Genes
@@ -144,6 +151,7 @@ pca_plot <- autoplot(
   colour = "Treatment",
   shape = "Treatment",
 ) +
+  scale_color_manual(values = c("blue", "red")) +
   geom_text_repel(aes(label = rownames(meta_table)), size = 4) +
   theme_classic()
 
@@ -213,18 +221,117 @@ ggsave("RHAU_WT_Volcano.pdf", plot = volcano_plot, device = "pdf", units = "cm",
 # Top Differentially Expressed Genes
 
 ```{r top-deg-table, results='asis'}
-top_up_tbl <- head(top_up_df[, c("gene_symbol", "logFC", "adj.P.Val")], 15)
-top_down_tbl <- head(top_down_df[, c("gene_symbol", "logFC", "adj.P.Val")], 15)
+top_up_tbl <- head(top_up_df[, c("logFC", "adj.P.Val", "AveExpr")], 15)
+top_down_tbl <- head(top_down_df[, c("logFC", "adj.P.Val", "AveExpr")], 15)
 
 top_deg_tbl <- rbind(
   transform(top_up_tbl, Direction = "Upregulated"),
   transform(top_down_tbl, Direction = "Downregulated")
 )
 
-top_deg_tbl <- top_deg_tbl[, c("Direction", "gene_symbol", "logFC", "adj.P.Val")]
-colnames(top_deg_tbl) <- c("Direction", "Gene Symbol", "logFC", "adj.P.Val")
+top_deg_tbl <- top_deg_tbl[, c("Direction", "logFC", "adj.P.Val", "AveExpr")]
+colnames(top_deg_tbl) <- c("Direction", "logFC", "adj.P.Val", "AveExpr")
 
 knitr::kable(top_deg_tbl, digits = 4, caption = "Top 15 upregulated and top 15 downregulated genes")
+```
+
+# DEG Heatmap
+
+```{r heatmap, fig.width=6, fig.height=6}
+# Significance thresholds for which DEGs go into the heatmap.
+# These are independent of the fixed |logFC| >= 1 / adj.P < 0.05 lines
+# drawn on the volcano plot above, so tune them here as needed.
+FC_threshold <- 2      # linear fold-change cutoff (log2(FC_threshold) is applied below)
+P_threshold  <- 0.05   # adjusted p-value cutoff
+
+# Prepare sample annotations, ordered so columns group by treatment
+col_annot_df <- data.frame(
+  Treatment = dge_v$targets$Treatment,
+  row.names = rownames(dge_v$targets)
+)
+col_annot_df <- col_annot_df[order(col_annot_df$Treatment), , drop = FALSE]
+
+# Select significant DEGs
+# NOTE: deg_tbl needs a comma to subset rows (not columns), and the gene
+# names live in the gene_symbol column, not V1.
+deg_sig <- deg_tbl[
+  abs(deg_tbl$logFC) > log2(FC_threshold) & deg_tbl$adj.P.Val < P_threshold,
+  "gene_symbol"
+]
+
+if (length(deg_sig) < 2) {
+  warning("Fewer than 2 genes pass the heatmap thresholds (FC_threshold = ",
+          FC_threshold, ", P_threshold = ", P_threshold,
+          "). Consider relaxing these before plotting.")
+}
+
+expr_deg <- dge_v$E[deg_sig, rownames(col_annot_df), drop = FALSE]
+
+# Create heatmap
+heatmap_custom <- pheatmap(
+  expr_deg,
+  scale = "row",
+  cluster_rows = TRUE,
+  cluster_cols = FALSE,
+  show_rownames = FALSE,
+  show_colnames = TRUE,
+  color = colorRampPalette(c("blue", "white", "red"))(100),
+  annotation_col = col_annot_df,
+  annotation_colors = list(Treatment = treatment_colors),
+  main = "Differential Expression Heatmap"
+)
+
+ggsave("RHAU_WT_Heatmap.pdf", plot = heatmap_custom, device = "pdf", units = "cm", width = 16, height = 18)
+```
+
+Rows are z-scored (`scale = "row"`) so the color scale reflects each
+gene's relative expression across samples, not its absolute expression
+level. Columns are grouped by treatment rather than clustered, so the
+WT/RHAU split stays easy to read.
+
+# Individual Gene Expression
+
+```{r gene-setup}
+gene_to_plot <- "Dhx36"  # Replace with your gene of interest
+
+if (!gene_to_plot %in% rownames(dge_v$E)) {
+  stop(gene_to_plot, " was not found in dge_v$E. Check spelling/capitalization, ",
+       "or confirm it survived the low-expression filtering step above.")
+}
+
+# dge_v$E holds voom log2-CPM values, which are legitimately negative for
+# lowly expressed genes -- that's expected and not shifted here, since
+# doing so would distort the log2 fold-change scale for every downstream
+# use of dge_v$E (including the heatmap above).
+gene_data <- data.frame(
+  Treatment = dge_v$targets$Treatment,
+  Expression = dge_v$E[gene_to_plot, ]
+)
+
+# Keep treatment order stable in the plots
+gene_data$Treatment <- factor(gene_data$Treatment, levels = levels(meta$Treatment))
+
+# Quick sanity check: inspect the mean expression by group before interpreting direction
+gene_summary <- gene_data %>%
+  group_by(Treatment) %>%
+  summarise(mean_expression = mean(Expression), .groups = "drop")
+
+gene_summary
+```
+
+
+```{r box-plot, fig.width=5, fig.height=5}
+boxplot <- ggplot(gene_data, aes(x = Treatment, y = Expression)) +
+  geom_boxplot(aes(fill = Treatment), alpha = 0.7) +
+  geom_jitter(width = 0.2, alpha = 0.6) +
+  scale_fill_manual(values = treatment_colors) +
+  theme_minimal() +
+  labs(title = paste(gene_to_plot, "Expression"), y = "log2 CPM (voom)") +
+  theme(legend.position = "none")
+
+boxplot
+
+ggsave(paste0("RHAU_", gene_to_plot, "_Boxplot.pdf"), plot = boxplot, device = "pdf", units = "cm", width = 12, height = 12)
 ```
 
 # Interpretation
@@ -235,6 +342,8 @@ The files saved by this workflow are:
 - RHAU_PCA.pdf for the sample clustering plot
 - RHAU_WT_DEG_results.tsv for the full DEG table
 - RHAU_WT_Volcano.pdf for the volcano plot
+- RHAU_WT_Heatmap.pdf for the DEG heatmap
+- RHAU_\<gene\>_Boxplot.pdf for the individual gene expression plot
 
 If your experiment is not truly paired, remove the Subject block from the
 voom and lmFit steps and use a standard two-group design instead.

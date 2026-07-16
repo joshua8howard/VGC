@@ -343,7 +343,7 @@ place it in your working directory or note its full path.
 ### 4.1 The GSEA Method
 
 ```{r msigdb-gsea, eval=FALSE}
-msigdb <- read.gmt("msigdb.v2024.1.Mm.symbols.gmt")
+msigdb <- read.gmt("msigdb.v2025.1.Mm.symbols.gmt")
 
 enrich_msigdb_gsea <- GSEA(logfc, TERM2GENE = msigdb)
 
@@ -355,7 +355,7 @@ fwrite(enrich_msigdb_gsea_df, "enrich_msigdb_gsea_df.tsv", sep = "\t")
 ### 4.2 The ORA Method
 
 ```{r msigdb-ora, eval=FALSE}
-msigdb <- read.gmt("msigdb.v2024.1.Mm.symbols.gmt")
+msigdb <- read.gmt("msigdb.v2025.1.Mm.symbols.gmt")
 
 enrich_msigdb_fet_up <- enricher(deg_up, TERM2GENE = msigdb)
 
@@ -365,7 +365,7 @@ fwrite(enrich_msigdb_fet_up_df, "enrich_msigdb_fet_up_df.tsv", sep = "\t")
 ```
 
 > Update the `.gmt` filename to match the species and MSigDB version you
-> downloaded (e.g. `msigdb.v2024.1.Hs.symbols.gmt` for human).
+> downloaded (e.g. `msigdb.v2025.1.Hs.symbols.gmt` for human).
 
 # Results Interpretation
 
