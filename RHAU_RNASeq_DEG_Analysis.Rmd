@@ -23,7 +23,8 @@ knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
 This document analyzes the combined count table in
 Alpha-WT-KO-counts.csv. The sample names suggest matched RHAU/WT pairs
 by subject ID (12, 13, 14), so the DEG step uses a paired limma-voom
-design with subject blocking.
+design with subject blocking. Pathway analysis (GSEA and ORA against
+MSigDB gene sets) is run at the end on the resulting DEGs.
 
 # Required Packages
 
@@ -34,7 +35,8 @@ if (!requireNamespace("BiocManager", quietly = TRUE)) {
   install.packages("BiocManager")
 }
 
-BiocManager::install(c("edgeR", "limma", "AnnotationDbi", "org.Mm.eg.db"))
+BiocManager::install(c("edgeR", "limma", "AnnotationDbi", "org.Mm.eg.db",
+                        "clusterProfiler", "enrichplot"))
 install.packages(c("data.table", "ggplot2", "ggrepel", "ggfortify", "statmod", "pheatmap", "dplyr"))
 ```
 
@@ -51,6 +53,8 @@ library(ggrepel)
 library(ggfortify)
 library(pheatmap)
 library(dplyr)
+library(clusterProfiler)
+library(enrichplot)
 ```
 
 # Read Count Table
@@ -124,7 +128,7 @@ dge <- normLibSizes(dge, method = "TMM")
 # Filter Low-Expression Genes
 
 ```{r filter-low-expression}
-keep <- filterByExpr(dge, group = meta$Treatment)
+keep <- filterByExpr(dge, group = meta$Treatment, min.count = 1, min.total.count = 3)
 dge <- dge[keep, , keep.lib.sizes = FALSE]
 ```
 
@@ -292,12 +296,15 @@ WT/RHAU split stays easy to read.
 # Individual Gene Expression
 
 ```{r gene-setup}
-gene_to_plot <- "Dhx36"  # Replace with your gene of interest
+gene_to_plot <- "Tbx21"  # Replace with your gene of interest
 
 if (!gene_to_plot %in% rownames(dge_v$E)) {
   stop(gene_to_plot, " was not found in dge_v$E. Check spelling/capitalization, ",
        "or confirm it survived the low-expression filtering step above.")
 }
+
+# Transform all gene expression values to positive (needed for some plot types)
+dge_v$E <- dge_v$E + abs(min(dge_v$E)) + 1
 
 # dge_v$E holds voom log2-CPM values, which are legitimately negative for
 # lowly expressed genes -- that's expected and not shifted here, since
@@ -334,6 +341,118 @@ boxplot
 ggsave(paste0("RHAU_", gene_to_plot, "_Boxplot.pdf"), plot = boxplot, device = "pdf", units = "cm", width = 12, height = 12)
 ```
 
+# MSigDB Pathway Analysis
+
+The most comprehensive option — incorporates GO, KEGG, Hallmark,
+Reactome, and other pathway collections in one analysis.
+
+Download the appropriate gene set `.gmt` file from the MSigDB website
+(choose the species-specific file — mouse or human). The chunk below
+assumes it has been placed in the **same directory as the count file**
+(`count_dir`), consistent with the rest of this document. Update
+`gmt_name` if your filename differs (MSigDB version numbers change
+periodically).
+
+```{r gmt-setup}
+gmt_name <- "msigdb.v2025.1.Mm.symbols.gmt"
+gmt_file <- file.path(count_dir, gmt_name)
+
+if (!file.exists(gmt_file)) {
+  stop("GMT file not found at ", gmt_file,
+       ". Confirm the filename/version and that it was downloaded into count_dir.")
+}
+
+msigdb <- read.gmt(gmt_file)
+```
+
+## Rank Genes for GSEA
+
+GSEA needs a numeric vector of every tested gene, named by gene symbol
+and sorted from highest to lowest. Ranking by logFC alone is used here
+for consistency with the volcano/heatmap logic above; ranking by a
+signed significance statistic (e.g. `-log10(P.Value) * sign(logFC)`)
+is a common alternative if you want the ranking to also weight
+significance, not just effect size.
+
+```{r rank-genes}
+logfc <- deg_tbl$logFC
+names(logfc) <- deg_tbl$gene_symbol
+
+# Drop any non-finite values and enforce the decreasing order GSEA expects
+logfc <- logfc[is.finite(logfc)]
+logfc <- sort(logfc, decreasing = TRUE)
+```
+
+## Define Up/Down Gene Sets for ORA
+
+ORA (over-representation) needs a simple gene list rather than a
+ranked vector, and ideally a defined background/`universe` — here, all
+genes that survived low-expression filtering — so enrichment is judged
+against genes that could plausibly have been detected as a DEG, not
+against the whole genome.
+
+```{r ora-gene-sets}
+deg_up   <- deg_tbl$gene_symbol[deg_tbl$direction == "Upregulated"]
+deg_down <- deg_tbl$gene_symbol[deg_tbl$direction == "Downregulated"]
+
+universe <- rownames(dge_v$E)
+```
+
+## GSEA Method
+
+```{r msigdb-gsea}
+enrich_msigdb_gsea <- GSEA(logfc, TERM2GENE = msigdb, pvalueCutoff = 0.05)
+
+enrich_msigdb_gsea_df <- enrich_msigdb_gsea@result
+
+fwrite(enrich_msigdb_gsea_df, "enrich_msigdb_gsea_df.tsv", sep = "\t")
+
+head(enrich_msigdb_gsea_df)
+```
+
+```{r msigdb-gsea-plot, fig.width=8, fig.height=6}
+if (nrow(enrich_msigdb_gsea_df) > 0) {
+  dotplot(enrich_msigdb_gsea, showCategory = 8, font.size = 8, split = ".sign") +
+    facet_grid(. ~ .sign) +
+    ggtitle("GSEA: MSigDB pathways enriched by rank (logFC)")
+}
+```
+
+## ORA Method
+
+Run separately for up- and down-regulated genes so the direction of
+each enriched pathway is unambiguous.
+
+```{r msigdb-ora}
+enrich_msigdb_fet_up <- enricher(deg_up, TERM2GENE = msigdb, universe = universe, pvalueCutoff = 1)
+enrich_msigdb_fet_down <- enricher(deg_down, TERM2GENE = msigdb, universe = universe, pvalueCutoff = 1)
+
+enrich_msigdb_fet_up_df <- enrich_msigdb_fet_up@result
+enrich_msigdb_fet_down_df <- enrich_msigdb_fet_down@result
+
+fwrite(enrich_msigdb_fet_up_df, "enrich_msigdb_fet_up_df.tsv", sep = "\t")
+fwrite(enrich_msigdb_fet_down_df, "enrich_msigdb_fet_down_df.tsv", sep = "\t")
+
+head(enrich_msigdb_fet_up_df)
+head(enrich_msigdb_fet_down_df)
+```
+
+```{r msigdb-ora-plot, fig.width=8, fig.height=6}
+if (nrow(enrich_msigdb_fet_up_df) > 0) {
+  dotplot(enrich_msigdb_fet_up, showCategory = 15) + ggtitle("ORA: pathways enriched in upregulated genes")
+}
+if (nrow(enrich_msigdb_fet_down_df) > 0) {
+  dotplot(enrich_msigdb_fet_down, showCategory = 15) + ggtitle("ORA: pathways enriched in downregulated genes")
+}
+```
+
+GSEA uses the full ranked gene list and detects coordinated shifts
+even when individual genes don't cross a significance threshold; ORA
+only considers genes that already passed the DEG cutoff, so it's more
+conservative but easier to interpret directionally (separate up/down
+results). Reporting both is common practice — treat agreement between
+the two as the strongest evidence for a pathway.
+
 # Interpretation
 
 The files saved by this workflow are:
@@ -344,6 +463,6 @@ The files saved by this workflow are:
 - RHAU_WT_Volcano.pdf for the volcano plot
 - RHAU_WT_Heatmap.pdf for the DEG heatmap
 - RHAU_\<gene\>_Boxplot.pdf for the individual gene expression plot
-
-If your experiment is not truly paired, remove the Subject block from the
-voom and lmFit steps and use a standard two-group design instead.
+- enrich_msigdb_gsea_df.tsv for the full MSigDB GSEA results
+- enrich_msigdb_fet_up_df.tsv / enrich_msigdb_fet_down_df.tsv for the
+  MSigDB ORA results, split by direction
