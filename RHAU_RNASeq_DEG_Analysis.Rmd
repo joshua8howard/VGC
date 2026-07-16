@@ -1,0 +1,240 @@
+---
+title: "RHAU RNAseq Analysis: From Count Table to DEGs"
+subtitle: "Paired RHAU vs WT workflow using Alpha-WT-KO-counts.csv"
+author: "Joshua Howard"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: cosmo
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Overview
+
+This document analyzes the combined count table in
+Alpha-WT-KO-counts.csv. The sample names suggest matched RHAU/WT pairs
+by subject ID (12, 13, 14), so the DEG step uses a paired limma-voom
+design with subject blocking.
+
+# Required Packages
+
+Install these once if needed.
+
+```{r install-packages, eval=FALSE}
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+
+BiocManager::install(c("edgeR", "limma", "AnnotationDbi", "org.Mm.eg.db"))
+install.packages(c("data.table", "ggplot2", "ggrepel", "ggfortify", "statmod"))
+```
+
+# Load Packages
+
+```{r load-packages}
+library(data.table)
+library(AnnotationDbi)
+library(org.Mm.eg.db)
+library(edgeR)
+library(limma)
+library(ggplot2)
+library(ggrepel)
+library(ggfortify)
+```
+
+# Read Count Table
+
+```{r read-counts}
+count_dir <- "//wsl.localhost/Ubuntu/home/unixuser/RHAU"
+count_name <- "Alpha-WT-KO-counts.csv"
+
+count_file <- file.path(count_dir, count_name)
+
+count_raw <- fread(count_file, data.table = FALSE)
+
+count_tbl <- count_raw
+
+rowname_col <- "gene_id"
+gene_ids <- count_tbl[[rowname_col]]
+count_tbl[[rowname_col]] <- NULL
+gene_symbols <- mapIds(
+  org.Mm.eg.db,
+  keys = gene_ids,
+  column = "SYMBOL",
+  keytype = "ENSEMBL",
+  multiVals = "first"
+)
+
+# FIX: If symbol is NA, keep the original Ensembl ID
+gene_symbols <- ifelse(is.na(gene_symbols), gene_ids, gene_symbols)
+
+count_tbl$gene_symbol <- gene_symbols
+
+count_tbl <- aggregate(. ~ gene_symbol, data = count_tbl, FUN = sum, na.rm = TRUE, na.action = na.pass)
+
+rownames(count_tbl) <- count_tbl$gene_symbol
+count_tbl$gene_symbol <- NULL
+```
+
+
+# Create Metadata
+
+```{r metadata}
+sample_ids <- colnames(count_tbl)
+
+meta <- data.frame(
+  SampleID = sample_ids,
+  Subject = sub("-(RHAU|WT)-Alpha$", "", sample_ids),
+  Treatment = factor(
+    ifelse(grepl("RHAU", sample_ids), "RHAU", "WT"),
+    levels = c("WT", "RHAU")
+  )
+)
+
+rownames(meta) <- meta$SampleID
+meta$Subject <- factor(meta$Subject)
+```
+
+The sample names determine both treatment and subject pairing, so the
+design stays aligned even if the columns are reordered.
+
+# Build DGE Object
+
+```{r dge-object}
+dge <- DGEList(counts = count_tbl, samples = meta)
+dge <- calcNormFactors(dge, method = "TMM")
+```
+
+# Filter Low-Expression Genes
+
+```{r filter-low-expression}
+keep <- filterByExpr(dge, group = meta$Treatment)
+dge <- dge[keep, , keep.lib.sizes = FALSE]
+```
+
+This keeps genes with enough counts to support a reliable comparison.
+
+# Normalization and PCA
+
+```{r normalize-and-pca, fig.width=7, fig.height=6}
+design <- model.matrix(~ 0 + Treatment, data = meta)
+colnames(design) <- levels(meta$Treatment)
+
+v0 <- voom(dge, design, plot = TRUE)
+corfit <- duplicateCorrelation(v0, design, block = meta$Subject)
+dge_v <- voom(dge, design, plot = TRUE, block = meta$Subject, correlation = corfit$consensus)
+
+saveRDS(dge_v, "RHAU_dge_v.rds")
+
+meta_table <- dge_v$targets
+pca_prep <- prcomp(t(dge_v$E), scale. = TRUE)
+
+pca_plot <- autoplot(
+  pca_prep,
+  data = meta_table,
+  colour = "Treatment",
+  shape = "Treatment",
+) +
+  geom_text_repel(aes(label = rownames(meta_table)), size = 4) +
+  theme_classic()
+
+pca_plot
+
+ggsave("RHAU_PCA.pdf", plot = pca_plot, device = "pdf", units = "cm", width = 16, height = 14)
+```
+
+# Differential Expression Analysis
+
+```{r deg-analysis}
+comparison <- "RHAU-WT"
+contrast_matrix <- makeContrasts(contrasts = comparison, levels = design)
+
+fit <- lmFit(dge_v, design, block = meta$Subject, correlation = corfit$consensus)
+fit_2 <- contrasts.fit(fit, contrast_matrix)
+fit_2 <- eBayes(fit_2)
+
+deg_tbl <- topTable(fit_2, coef = 1, n = Inf, p.value = 1, lfc = 0, sort.by = "P")
+deg_tbl$gene_symbol <- rownames(deg_tbl)
+
+fwrite(deg_tbl, "RHAU_WT_DEG_results.tsv", sep = "\t", row.names = TRUE)
+
+head(deg_tbl)
+```
+
+Positive logFC values mean higher expression in RHAU relative to WT.
+If you want the reverse biological direction, change the contrast to
+WT-RHAU.
+
+# Volcano Plot
+
+```{r volcano-plot, fig.width=8, fig.height=7}
+deg_tbl$neg_log10_adj_p <- -log10(pmax(deg_tbl$adj.P.Val, .Machine$double.xmin))
+deg_tbl$direction <- with(
+  deg_tbl,
+  ifelse(adj.P.Val < 0.05 & logFC >= 1, "Upregulated",
+         ifelse(adj.P.Val < 0.05 & logFC <= -1, "Downregulated", "Not significant"))
+)
+
+top_up_df <- deg_tbl[deg_tbl$direction == "Upregulated", ][order(deg_tbl[deg_tbl$direction == "Upregulated", "adj.P.Val"]), ]
+top_down_df <- deg_tbl[deg_tbl$direction == "Downregulated", ][order(deg_tbl[deg_tbl$direction == "Downregulated", "adj.P.Val"]), ]
+label_df <- rbind(
+  head(top_up_df, 15),
+  head(top_down_df, 15)
+)
+
+volcano_plot <- ggplot(deg_tbl, aes(x = logFC, y = neg_log10_adj_p)) +
+  geom_point(aes(color = direction), alpha = 0.8, size = 1.8) +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "grey50") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "grey50") +
+  geom_text_repel(data = label_df, aes(label = gene_symbol), size = 3, max.overlaps = 20) +
+  scale_color_manual(values = c("Upregulated" = "red", "Downregulated" = "blue", "Not significant" = "grey70")) +
+  labs(
+    title = "RHAU vs WT volcano plot",
+    x = "log2 fold change",
+    y = "-log10 adjusted p-value",
+    color = "Direction"
+  ) +
+  theme_classic()
+
+volcano_plot
+
+ggsave("RHAU_WT_Volcano.pdf", plot = volcano_plot, device = "pdf", units = "cm", width = 18, height = 15)
+```
+
+# Top Differentially Expressed Genes
+
+```{r top-deg-table, results='asis'}
+top_up_tbl <- head(top_up_df[, c("gene_symbol", "logFC", "adj.P.Val")], 15)
+top_down_tbl <- head(top_down_df[, c("gene_symbol", "logFC", "adj.P.Val")], 15)
+
+top_deg_tbl <- rbind(
+  transform(top_up_tbl, Direction = "Upregulated"),
+  transform(top_down_tbl, Direction = "Downregulated")
+)
+
+top_deg_tbl <- top_deg_tbl[, c("Direction", "gene_symbol", "logFC", "adj.P.Val")]
+colnames(top_deg_tbl) <- c("Direction", "Gene Symbol", "logFC", "adj.P.Val")
+
+knitr::kable(top_deg_tbl, digits = 4, caption = "Top 15 upregulated and top 15 downregulated genes")
+```
+
+# Interpretation
+
+The files saved by this workflow are:
+
+- RHAU_dge_v.rds for the normalized voom object
+- RHAU_PCA.pdf for the sample clustering plot
+- RHAU_WT_DEG_results.tsv for the full DEG table
+- RHAU_WT_Volcano.pdf for the volcano plot
+
+If your experiment is not truly paired, remove the Subject block from the
+voom and lmFit steps and use a standard two-group design instead.
