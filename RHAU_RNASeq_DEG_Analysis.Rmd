@@ -36,7 +36,7 @@ if (!requireNamespace("BiocManager", quietly = TRUE)) {
 }
 
 BiocManager::install(c("edgeR", "limma", "AnnotationDbi", "org.Mm.eg.db",
-                        "clusterProfiler", "enrichplot"))
+                        "clusterProfiler", "enrichplot", "rtracklayer"))
 install.packages(c("data.table", "ggplot2", "ggrepel", "ggfortify", "statmod", "pheatmap", "dplyr"))
 ```
 
@@ -55,6 +55,7 @@ library(pheatmap)
 library(dplyr)
 library(clusterProfiler)
 library(enrichplot)
+library(rtracklayer)
 ```
 
 # Read Count Table
@@ -62,34 +63,46 @@ library(enrichplot)
 ```{r read-counts}
 count_dir <- "//wsl.localhost/Ubuntu/home/unixuser/RHAU"
 count_name <- "Alpha-WT-KO-counts.csv"
-
 count_file <- file.path(count_dir, count_name)
 
+# 1. Load your count data
 count_raw <- fread(count_file, data.table = FALSE)
-
 count_tbl <- count_raw
 
 rowname_col <- "gene_id"
 gene_ids <- count_tbl[[rowname_col]]
 count_tbl[[rowname_col]] <- NULL
-gene_symbols <- mapIds(
-  org.Mm.eg.db,
-  keys = gene_ids,
-  column = "SYMBOL",
-  keytype = "ENSEMBL",
-  multiVals = "first"
-)
 
-# FIX: If symbol is NA, keep the original Ensembl ID
+# 2. Load and parse the GTF file
+# (Adjust the path and filename to match your actual GTF file)
+gtf_name <- "gencode.vM33.annotation.gtf" 
+gtf_file <- file.path(count_dir, gtf_name)
+
+# Import GTF and convert to a data frame
+gtf_data <- as.data.frame(import(gtf_file))
+
+# Filter for gene features to speed up mapping
+gene_map <- subset(gtf_data, type == "gene")
+
+# 3. Map Ensembl IDs to Symbols using the GTF data
+# Creates a named vector: names = gene_id, values = gene_name
+# Note: GTF files typically use 'gene_id' and 'gene_name' (symbol)
+ensembl_to_symbol <- setNames(gene_map$gene_name, gene_map$gene_id)
+
+# Match your count IDs to the GTF mapping vector
+gene_symbols <- ensembl_to_symbol[gene_ids]
+
+# 4. If symbol is NA, keep the original Ensembl ID
 gene_symbols <- ifelse(is.na(gene_symbols), gene_ids, gene_symbols)
 
+# 5. Attach symbols and aggregate duplicates
 count_tbl$gene_symbol <- gene_symbols
-
 count_tbl <- aggregate(. ~ gene_symbol, data = count_tbl, FUN = sum, na.rm = TRUE, na.action = na.pass)
 
 rownames(count_tbl) <- count_tbl$gene_symbol
 count_tbl$gene_symbol <- NULL
 ```
+
 
 
 # Create Metadata
@@ -295,22 +308,23 @@ WT/RHAU split stays easy to read.
 
 # Gene Panel Expression Heatmap
 
-```{r heatmap-legend}
-# DEG Heatmap — CSR + Proliferation gene panel
-# Rows ordered and grouped by gene function (CSR vs Proliferation), not clustered,
-# so the two groups form clean, contiguous blocks.
+```{r heatmap-legend, fig.width=8, fig.height=8}
+# DEG Heatmap — CSR + DNA Repair + Proliferation gene panel
+# Rows ordered and grouped by gene function (CSR vs DNA Repair vs Proliferation), not clustered,
+# so the three groups form clean, contiguous blocks.
 
 csr_genes <- c(
   # DNA Cleavage & Initiation
-  "Aicda", "Ung", "Smug1",
+  "Aicda", "Ung", "Smug1", "Apex1"
+)
+
+dna_repair_genes <- c(
   # NHEJ Repair
   "Xrcc6", "Xrcc5", "Prkdc", "Lig4", "Xrcc4", "Nhej1", "Paxx",
   # A-EJ Repair
   "Parp1", "Lig3", "Xrcc1",
   # DNA Damage Response & Synapsis
-  "Atm", "Trp53bp1", "Mre11", "Rad50", "Nbn", "Stag2", "Smc1a", "Smc3",
-  # Transcription & Epigenetic Targeting
-  "Hoxc4", "Pou2f1", "Pou2f2", "Cxxc1", "Sub1"
+  "Atm", "Trp53bp1", "Mre11", "Rad50", "Nbn", "Stag2", "Smc1a", "Smc3"
 )
 
 proliferation_genes <- c(
@@ -323,13 +337,16 @@ proliferation_genes <- c(
 )
 
 transcription_factors <- c(
-  "Bcl6", "Irf4", "Irf8", "Prdm1", "Xbp1", "Spib"
+  # B Cell Lineage & Differentiation
+  "Tbx21", "Bcl6", "Prdm1", "Irf4", "Irf8", "Spib", "Spi1", "Ebf1"
 )
 
 gene_panel <- data.frame(
-  gene_symbol = c(csr_genes, proliferation_genes),
+  gene_symbol = c(csr_genes, dna_repair_genes, proliferation_genes, transcription_factors),
   GeneGroup = c(rep("CSR", length(csr_genes)),
-                rep("Proliferation", length(proliferation_genes))),
+                rep("DNA Repair", length(dna_repair_genes)),
+                rep("Proliferation", length(proliferation_genes)),
+                rep("Transcription Factor", length(transcription_factors))),
   stringsAsFactors = FALSE
 )
 
@@ -350,9 +367,11 @@ if (nrow(gene_panel) < 2) {
           "Check symbol spelling and the low-expression filter above.")
 }
 
-# Keep CSR genes first, Proliferation genes second, preserving the functional
+# Keep CSR genes first, DNA Repair genes second, Proliferation genes third, preserving the functional
 # sub-order within each group (rather than alphabetical or cluster-driven order)
-gene_panel$GeneGroup <- factor(gene_panel$GeneGroup, levels = c("CSR", "Proliferation"))
+gene_panel$GeneGroup <- factor(gene_panel$GeneGroup, levels = c("CSR", "DNA Repair"
+                                                                , "Proliferation", "Transcription Factor"
+                                                                ))
 gene_panel <- gene_panel[order(gene_panel$GeneGroup), ]
 
 # Row index where the CSR block ends, used to draw a gap line between blocks
@@ -372,7 +391,9 @@ row_annot_df <- data.frame(
   check.names = FALSE
 )
 
-group_colors <- c(CSR = "white", Proliferation = "black")
+group_colors <- c(CSR = "black", "DNA Repair" = "red"
+                  , Proliferation = "white", "Transcription Factor" = "blue"
+                  )
 
 expr_deg <- dge_v$E[gene_panel$gene_symbol, rownames(col_annot_df), drop = FALSE]
 
@@ -392,7 +413,7 @@ heatmap_custom <- pheatmap(
   annotation_col = col_annot_df,
   annotation_row = row_annot_df,
   annotation_colors = list(Treatment = treatment_colors, "Gene Group" = group_colors),
-  main = "CSR & Proliferation Gene Panel Expression Heatmap"
+  main = "Gene Group Expression Heatmap"
 )
 
 ggsave("RHAU_CSR_Proliferation_Heatmap.pdf", plot = heatmap_custom, device = "pdf",
@@ -410,7 +431,8 @@ if (!gene_to_plot %in% rownames(dge_v$E)) {
 }
 
 # Transform all gene expression values to positive (needed for some plot types)
-dge_v$E <- dge_v$E + abs(min(dge_v$E)) + 1
+dge_v2 <- dge_v
+dge_v2$E <- dge_v$E + abs(min(dge_v$E)) + 1
 
 # dge_v$E holds voom log2-CPM values, which are legitimately negative for
 # lowly expressed genes -- that's expected and not shifted here, since
