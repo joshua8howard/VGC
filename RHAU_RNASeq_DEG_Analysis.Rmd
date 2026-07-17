@@ -293,6 +293,112 @@ gene's relative expression across samples, not its absolute expression
 level. Columns are grouped by treatment rather than clustered, so the
 WT/RHAU split stays easy to read.
 
+# Gene Panel Expression Heatmap
+
+```{r heatmap-legend}
+# DEG Heatmap — CSR + Proliferation gene panel
+# Rows ordered and grouped by gene function (CSR vs Proliferation), not clustered,
+# so the two groups form clean, contiguous blocks.
+
+csr_genes <- c(
+  # DNA Cleavage & Initiation
+  "Aicda", "Ung", "Smug1",
+  # NHEJ Repair
+  "Xrcc6", "Xrcc5", "Prkdc", "Lig4", "Xrcc4", "Nhej1", "Paxx",
+  # A-EJ Repair
+  "Parp1", "Lig3", "Xrcc1",
+  # DNA Damage Response & Synapsis
+  "Atm", "Trp53bp1", "Mre11", "Rad50", "Nbn", "Stag2", "Smc1a", "Smc3",
+  # Transcription & Epigenetic Targeting
+  "Hoxc4", "Pou2f1", "Pou2f2", "Cxxc1", "Sub1"
+)
+
+proliferation_genes <- c(
+  # Cell Cycle Entry & Checkpoints
+  "Myc", "Ccnd2", "Ccnd3", "Cdk4", "Cdk6", "E2f1",
+  # DNA Replication & Elongation (S-Phase)
+  "Pcna", "Mki67", "Mcm2", "Mcm3", "Mcm4", "Mcm5", "Mcm6", "Mcm7",
+  # Upstream Proliferative Signaling Receptors
+  "Cd40", "Tnfrsf13b", "Tnfrsf17", "Il4r"
+)
+
+transcription_factors <- c(
+  "Bcl6", "Irf4", "Irf8", "Prdm1", "Xbp1", "Spib"
+)
+
+gene_panel <- data.frame(
+  gene_symbol = c(csr_genes, proliferation_genes),
+  GeneGroup = c(rep("CSR", length(csr_genes)),
+                rep("Proliferation", length(proliferation_genes))),
+  stringsAsFactors = FALSE
+)
+
+# Match against the filtered/voom-normalized gene set
+available_genes <- rownames(dge_v$E)
+found <- gene_panel$gene_symbol %in% available_genes
+missing_genes <- gene_panel$gene_symbol[!found]
+
+if (length(missing_genes) > 0) {
+  warning("The following genes were not found in dge_v$E (filtered out earlier, ",
+          "or symbol mismatch): ", paste(missing_genes, collapse = ", "))
+}
+
+gene_panel <- gene_panel[found, ]
+
+if (nrow(gene_panel) < 2) {
+  warning("Fewer than 2 panel genes were found in the filtered dataset. ",
+          "Check symbol spelling and the low-expression filter above.")
+}
+
+# Keep CSR genes first, Proliferation genes second, preserving the functional
+# sub-order within each group (rather than alphabetical or cluster-driven order)
+gene_panel$GeneGroup <- factor(gene_panel$GeneGroup, levels = c("CSR", "Proliferation"))
+gene_panel <- gene_panel[order(gene_panel$GeneGroup), ]
+
+# Row index where the CSR block ends, used to draw a gap line between blocks
+csr_block_size <- sum(gene_panel$GeneGroup == "CSR")
+
+# Prepare sample annotations, ordered so columns group by treatment
+col_annot_df <- data.frame(
+  Treatment = dge_v$targets$Treatment,
+  row.names = rownames(dge_v$targets)
+)
+col_annot_df <- col_annot_df[order(col_annot_df$Treatment), , drop = FALSE]
+
+# Row annotation by gene functional group
+row_annot_df <- data.frame(
+  "Gene Group" = gene_panel$GeneGroup,
+  row.names = gene_panel$gene_symbol,
+  check.names = FALSE
+)
+
+group_colors <- c(CSR = "white", Proliferation = "black")
+
+expr_deg <- dge_v$E[gene_panel$gene_symbol, rownames(col_annot_df), drop = FALSE]
+
+# Create heatmap
+heatmap_custom <- pheatmap(
+  expr_deg,
+  scale = "row",
+  treeheight_row = 0, 
+  treeheight_col = 0,
+  cluster_rows = TRUE,   # preserve CSR / Proliferation block order instead of clustering
+  cluster_cols = FALSE,
+  gaps_row = csr_block_size,  # draws a visual line between the two gene groups
+  show_rownames = TRUE,
+  show_colnames = TRUE,
+  fontsize_row = 7,
+  color = colorRampPalette(c("blue", "white", "red"))(100),
+  annotation_col = col_annot_df,
+  annotation_row = row_annot_df,
+  annotation_colors = list(Treatment = treatment_colors, "Gene Group" = group_colors),
+  main = "CSR & Proliferation Gene Panel Expression Heatmap"
+)
+
+ggsave("RHAU_CSR_Proliferation_Heatmap.pdf", plot = heatmap_custom, device = "pdf",
+       units = "cm", width = 24, height = 24)
+```
+
 # Individual Gene Expression
 
 ```{r gene-setup}
